@@ -10,6 +10,7 @@
 # splituapp for Python2/3 by Natsume324
 # For extracting img files from UPDATE.APP
 # Updated based on HuaweiUpdateLibrary C# struct. 2026.2.26
+# Added extraction progress display.
 
 from __future__ import print_function
 
@@ -91,14 +92,20 @@ def extract(source, flist):
                     filename = "{}_{}".format(base_filename, counter)
                     counter += 1
                 
-                print('Extracting {}.img ...'.format(filename))
-                
+                # 动态进度显示：开始提取
                 out_path = os.path.join(outdir, filename + '.img')
                 bytes_left = file_size
                 chunk_size = 1048576  # 1MB 读写缓冲区
                 
                 try:
                     with open(out_path, 'wb') as o:
+                        total_size = file_size
+                        written = 0
+                        last_percent = -1
+                        # 初始化进度行（不换行）
+                        sys.stdout.write("Extracting {}: 0%".format(filename))
+                        sys.stdout.flush()
+                        
                         while bytes_left > 0:
                             read_size = min(chunk_size, bytes_left)
                             data = f.read(read_size)
@@ -106,7 +113,23 @@ def extract(source, flist):
                                 break
                             o.write(data)
                             bytes_left -= len(data)
+                            written += len(data)
+                            
+                            if total_size > 0:
+                                percent = int(100 * written / total_size)
+                            else:
+                                percent = 100
+                                
+                            if percent != last_percent:
+                                sys.stdout.write("\rExtracting {}: {}%".format(filename, percent))
+                                sys.stdout.flush()
+                                last_percent = percent
+                        
+                        # 完成进度，换行
+                        sys.stdout.write(" - Done.\n")
                 except Exception as e:
+                    # 先换行避免覆盖进度行
+                    sys.stdout.write("\n")
                     print('ERROR: Failed to create {}.img\nReason: {}'.format(filename, str(e)))
                     return 1
                     
