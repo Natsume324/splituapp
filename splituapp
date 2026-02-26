@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 # splituapp for Python2/3 by SuperR. @XDA
 #
@@ -6,123 +7,129 @@
 
 # Based on the app_structure file in split_updata.pl by McSpoon
 
+# splituapp for Python2/3 by Natsume324
+# For extracting img files from UPDATE.APP
+# Updated based on HuaweiUpdateLibrary C# struct. 2026.2.26
+
 from __future__ import print_function
 
 import os
-import re
 import sys
-import string
 import struct
-from subprocess import check_output
+import argparse
 
 def extract(source, flist):
-	def cmd(command):
-		try:
-			test1 = check_output(command)
-			test1 = test1.strip().decode()
-		except:
-			test1 = ''
+    outdir = 'output'
+    img_files = set()
 
-		return test1
+    try:
+        if not os.path.exists(outdir):
+            os.makedirs(outdir)
+    except Exception as e:
+        print("ERROR: Could not create output directory:", e)
+        return 1
 
-	bytenum = 4
-	outdir = 'output'
-	img_files = []
+    # 根据 C# Struct 映射的格式化字符串 (Total: 98 bytes)
+    # <  : Little Endian
+    # I  : HeaderId (4 bytes)
+    # I  : HeaderSize (4 bytes)
+    # I  : Unknown1 (4 bytes)
+    # 8s : HardwareId (8 bytes)
+    # I  : FileSequence (4 bytes)
+    # I  : FileSize (4 bytes)
+    # 16s: FileDate (16 bytes)
+    # 16s: FileTime (16 bytes)
+    # 20s: FileType / Filename (20 bytes)
+    # 14s: Blank1 (14 bytes)
+    # H  : HeaderChecksum (2 bytes)
+    # H  : BlockSize (2 bytes)
+    # H  : Blank2 (2 bytes)
+    header_fmt = '<III8sII16s16s20s14sHHH'
+    header_size_expected = struct.calcsize(header_fmt)  # 98 字节
 
-	try:
-		os.makedirs(outdir)
-	except:
-		pass
+    with open(source, 'rb') as f:
+        while True:
+            # 查找魔法头部标识 0xA55AAA55
+            magic = f.read(4)
+            if not magic:
+                break
+            
+            if magic != b'\x55\xAA\x5A\xA5':
+                continue
+            
+            # 找到标识，回退 4 个字节以读取整个结构体
+            f.seek(-4, 1)
+            
+            header_data = f.read(header_size_expected)
+            if len(header_data) < header_size_expected:
+                break
+                
+            # 解析头部
+            unpacked = struct.unpack(header_fmt, header_data)
+            
+            header_size = unpacked[1]
+            file_size = unpacked[5]
+            file_type_raw = unpacked[8]
+            
+            # 提取文件名 (FileType)，去除尾部的空字节和多余字符
+            try:
+                filename = file_type_raw.split(b'\x00')[0].decode('ascii').strip().lower()
+            except Exception:
+                filename = ''
+                
+            # C# 结构体大小为98字节。如果 HeaderSize 大于 98，说明存在附加的 padding 或 crc 数据，需要跳过。
+            extra_header_bytes = header_size - header_size_expected
+            if extra_header_bytes > 0:
+                f.seek(extra_header_bytes, 1)
 
-	py2 = None
-	if int(''.join(str(i) for i in sys.version_info[0:2])) < 30:
-		py2 = 1
+            # 判断是否需要提取当前文件
+            if filename and (not flist or filename in flist):
+                # 处理重名文件 (例如出现两个同名 partition)
+                base_filename = filename
+                counter = 2
+                while filename in img_files:
+                    filename = "{}_{}".format(base_filename, counter)
+                    counter += 1
+                
+                print('Extracting {}.img ...'.format(filename))
+                
+                out_path = os.path.join(outdir, filename + '.img')
+                bytes_left = file_size
+                chunk_size = 1048576  # 1MB 读写缓冲区
+                
+                try:
+                    with open(out_path, 'wb') as o:
+                        while bytes_left > 0:
+                            read_size = min(chunk_size, bytes_left)
+                            data = f.read(read_size)
+                            if not data:
+                                break
+                            o.write(data)
+                            bytes_left -= len(data)
+                except Exception as e:
+                    print('ERROR: Failed to create {}.img\nReason: {}'.format(filename, str(e)))
+                    return 1
+                    
+                img_files.add(filename)
+            else:
+                # 若不需要提取此文件，则直接跳过文件内容主体
+                f.seek(file_size, 1)
 
-	with open(source, 'rb') as f:
-		while True:
-			i = f.read(bytenum)
+            # Huawei Update.app 的每一个数据块通常是以 4 字节为单位对齐的
+            xbytes = 4 - (f.tell() % 4)
+            if xbytes < 4:
+                f.seek(xbytes, 1)
 
-			if not i:
-				break
-			elif i != b'\x55\xAA\x5A\xA5':
-				continue
-
-			headersize = f.read(bytenum)
-			headersize = list(struct.unpack('<L', headersize))[0]
-			f.seek(16, 1)
-			filesize = f.read(bytenum)
-			filesize = list(struct.unpack('<L', filesize))[0]
-			f.seek(32, 1)
-			filename = f.read(16)
-
-			try:
-				filename = str(filename.decode())
-				filename = ''.join(f for f in filename if f in string.printable).lower()
-			except:
-				filename = ''
-
-			f.seek(22, 1)
-			crcdata = f.read(headersize - 98)
-
-			if not flist or filename in flist:
-				if filename in img_files:
-					filename = filename+'_2'
-
-				print('Extracting '+filename+'.img ...')
-
-				chunk = 10240
-
-				try:
-					with open(outdir+os.sep+filename+'.img', 'wb') as o:
-						while filesize > 0:
-							if chunk > filesize:
-								chunk = filesize
-
-							o.write(f.read(chunk))
-							filesize -= chunk
-				except:
-					print('ERROR: Failed to create '+filename+'.img\n')
-					return 1
-
-				img_files.append(filename)
-
-				if os.name != 'nt':
-					if os.path.isfile('crc'):
-						print('Calculating crc value for '+filename+'.img ...\n')
-
-						crcval = []
-						if py2:
-							for i in crcdata:
-								crcval.append('%02X' % ord(i))
-						else:
-							for i in crcdata:
-								crcval.append('%02X' % i)
-
-						crcval = ''.join(crcval)
-						crcact = cmd('./crc output/'+filename+'.img')
-
-						if crcval != crcact:
-							print('ERROR: crc value for '+filename+'.img does not match\n')
-							return 1
-			else:
-				f.seek(filesize, 1)
-
-			xbytes = bytenum - f.tell() % bytenum
-			if xbytes < bytenum:
-				f.seek(xbytes, 1)
-
-	print('\nExtraction complete')
-	return 0
+    print('\nExtraction complete')
+    return 0
 
 if __name__ == '__main__':
-	import argparse
+    parser = argparse.ArgumentParser(description="Split UPDATE.APP file into img files", add_help=False)
+    required = parser.add_argument_group('Required')
+    required.add_argument("-f", "--filename", required=True, help="Path to update.app file")
+    optional = parser.add_argument_group('Optional')
+    optional.add_argument("-h", "--help", action="help", help="show this help message and exit")
+    optional.add_argument("-l", "--list", nargs="*", metavar=('img1', 'img2'), help="List of img files to extract")
+    args = parser.parse_args()
 
-	parser = argparse.ArgumentParser(description="Split UPDATE.APP file into img files", add_help=False)
-	required = parser.add_argument_group('Required')
-	required.add_argument("-f", "--filename", required=True, help="Path to update.app file")
-	optional = parser.add_argument_group('Optional')
-	optional.add_argument("-h", "--help", action="help", help="show this help message and exit")
-	optional.add_argument("-l", "--list", nargs="*", metavar=('img1', 'img2'), help="List of img files to extract")
-	args = parser.parse_args()
-
-	extract(args.filename, args.list)
+    extract(args.filename, args.list)
